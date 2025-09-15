@@ -5,8 +5,12 @@ import com.volcengine.ark.runtime.model.completion.chat.ChatCompletionRequest;
 import com.volcengine.ark.runtime.model.completion.chat.ChatMessage;
 import com.volcengine.ark.runtime.model.completion.chat.ChatMessageRole;
 import com.volcengine.ark.runtime.service.ArkService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
+import org.springframework.util.DigestUtils;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.ArrayList;
@@ -14,8 +18,17 @@ import java.util.Base64;
 import java.util.List;
 
 @Service
+@Slf4j
 public class VolcengineApiService {
+    private final CacheService cacheService;
 
+    // 使用构造器注入和@Lazy注解解决循环依赖
+    @Autowired
+    public VolcengineApiService(@Lazy CacheService cacheService) {
+        this.cacheService = cacheService;
+    }
+
+    // 其他代码保持不变...
     @Value("${volcengine.ark.api-key}")
     private String apiKey;
 
@@ -40,18 +53,32 @@ public class VolcengineApiService {
                     "- 总描述长度控制在300-500字之间";
 
     /**
-     * 处理图片并调用火山引擎API获取分析结果（支持自定义提示词）
+     * 处理图片并调用缓存服务获取分析结果
      */
     public String analyzeImage(MultipartFile imageFile, String userPrompt) throws Exception {
         if (imageFile.isEmpty()) {
             throw new IllegalArgumentException("请上传有效的图片文件");
         }
 
+        // 生成图片唯一标识（MD5）
+        String imageHash = generateImageHash(imageFile);
+        log.info("图片哈希值: {}", imageHash);
+        // 转换图片为Base64
+        String base64Image = convertToBase64(imageFile);
         // 组合提示词
         String finalPrompt = combinePrompts(BASE_PROMPT, userPrompt);
+        // 调用带缓存的分析方法
+        return cacheService.analyzeImageWithCache(imageHash, base64Image, finalPrompt);
+    }
 
-        String base64Image = convertToBase64(imageFile);
-        return callVolcengineApi(base64Image, finalPrompt);
+    // 其他方法保持不变...
+
+    /**
+     * 生成图片文件的MD5哈希值（作为唯一标识）
+     */
+    private String generateImageHash(MultipartFile imageFile) throws Exception {
+        byte[] imageBytes = imageFile.getBytes();
+        return DigestUtils.md5DigestAsHex(imageBytes);
     }
 
     /**
@@ -61,7 +88,6 @@ public class VolcengineApiService {
         if (userPrompt == null || userPrompt.trim().isEmpty()) {
             return basePrompt;
         }
-
         return basePrompt + "\n\n用户额外要求: " + userPrompt;
     }
 
@@ -75,9 +101,10 @@ public class VolcengineApiService {
     }
 
     /**
-     * 调用火山引擎API（带Token限制）
+     * 实现接口方法：调用火山引擎API
      */
-    private String callVolcengineApi(String base64Image, String prompt) throws Exception {
+    public String callVolcengineApi(String base64Image, String prompt) throws Exception {
+        log.info("开始调用火山引擎API进行图片分析");
         ArkService arkService = ArkService.builder()
                 .apiKey(apiKey)
                 .region(region)
@@ -91,12 +118,11 @@ public class VolcengineApiService {
                     .build();
             messages.add(userMessage);
 
-            // 设置合理的最大Token限制（火山引擎视觉模型通常支持4096 tokens）
             ChatCompletionRequest request = ChatCompletionRequest.builder()
                     .model(modelId)
                     .messages(messages)
-                    .temperature(0.3)
-                    .maxTokens(4096) // 设置为合理范围内的最大值
+                    .temperature(0.2)
+                    .maxTokens(4096)
                     .build();
 
             return (String) arkService.createChatCompletion(request)
@@ -116,7 +142,6 @@ public class VolcengineApiService {
         List<Object> contentList = new ArrayList<>();
         contentList.add(new ChatContent("text", prompt));
         contentList.add(new ChatContent("image_url", new ImageUrl(base64Image)));
-
         return JSON.toJSONString(contentList);
     }
 
